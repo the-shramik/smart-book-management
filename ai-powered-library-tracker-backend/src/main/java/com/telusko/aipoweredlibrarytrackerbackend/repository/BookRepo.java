@@ -9,5 +9,5 @@ import java.util.List;
 @Repository
 public interface BookRepo extends JpaRepository<Book,Long> {
 
-    List<Book> findAllByEmail(String email);
+    List<Book> findAllByUserEmail(String email);
 }

@@ -20,10 +20,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
 import java.nio.file.Files;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 
 @Service
 public class BookService {
@@ -45,6 +42,7 @@ public class BookService {
 
     @Autowired
     private ResourceLoader resourceLoader;
+
 
     // Add or update book
     public Book addBook(Book book, MultipartFile image) throws IOException {
@@ -86,69 +84,85 @@ public class BookService {
     // Generate description using AI
     public String generateDescription(String title, String genre) {
         String prompt = """
-                Write a short and engaging description for the book:
-                Title: %s
-                Genre: %s
-                Max: 200 characters
-                """.formatted(title, genre);
+        You are an expert book assistant.
+        Based on your knowledge of publicly known books, write a short, accurate, and engaging description.
+        
+        Book Title: %s
+        Genre: %s
+        
+        Instructions:
+        - Use real book knowledge if the book is well-known.
+        - If not, create a realistic but generic 200-character description.
+        - Keep it concise and appealing.
 
-        return chatClient.prompt(prompt).call()
-                .chatResponse().getResult().getOutput().getText();
+        Max Length: 200 characters.
+        """.formatted(title, genre);
+
+        return chatClient.prompt(prompt)
+                .call()
+                .chatResponse()
+                .getResult()
+                .getOutput()
+                .getText()
+                .trim();
     }
 
     // Generate cover image
     public byte[] generateImage(String title, String genre, String desc) {
         String imagePrompt = """
-                Create a realistic book cover for:
-                Title: %s
-                Genre: %s
-                Description: %s
-                Clean background, professional, no human.
-                """.formatted(title, genre, desc);
+        You are a professional book cover designer.
+        
+        Design a high-quality, realistic book cover based on the following details:
+        - Title: %s
+        - Genre: %s
+        - Description: %s
+
+        Style Requirements:
+        - Clean and modern design
+        - Professional typography
+        - No human figures
+        - Use genre-appropriate colors and imagery
+        - Center the title visually
+        - Avoid text except the title (no author, no blurbs)
+
+        Output: Book cover illustration only (not 3D or mockup).
+        """.formatted(title, genre, desc);
 
         return aiImageGeneratorService.generateImage(imagePrompt);
     }
 
-    public List<Book> searchByVoice(MultipartFile audio,String userQuery, String email) {
+
+    public List<Book> searchByVoice(MultipartFile audio, String userQuery) {
         try {
-            String query=null;
-
-            if(audio != null || !audio.isEmpty()) {
-                query = aiAudioTranscriptionModel.call(audio.getResource());
-            }else {
-                query=userQuery;
-            }
-
-            // Step 2: Semantic vector search
-            List<Document> documents = vectorStore.similaritySearch(
-                    SearchRequest.builder()
-                            .query(query)
-                            .topK(5)
-                            .similarityThreshold(0.7f)
-                            .build()
-            );
-
-            // Step 3: Filter and build context string
-            StringBuilder contextBuilder = new StringBuilder();
-            for (Document doc : documents) {
-                if (email.equals(doc.getMetadata().get("email"))) {
-                    contextBuilder.append(doc.getFormattedContent()).append("\n");
-                }
-            }
-
-            String context = contextBuilder.toString();
-
-            // Step 4: Load prompt template from file
+            // Load prompt template from classpath resource
             String promptTemplate = Files.readString(
                     resourceLoader.getResource("classpath:prompts/book-search-prompt.st")
-                            .getFile().toPath()
+                            .getFile()
+                            .toPath()
             );
 
-            // Step 5: Fill template variables
+            //Determine the search query
+            String query = null;
+
+            if (audio != null && !audio.isEmpty()) {
+                query = aiAudioTranscriptionModel.call(audio.getResource());
+            } else if (userQuery != null && !userQuery.trim().isEmpty()) {
+                query = userQuery;
+            } else {
+                throw new IllegalArgumentException("No audio or text query provided.");
+            }
+
+            System.out.println("Final Query: " + query);
+
+            // Fetch related context from vector store using semantic similarity
+            String context = fetchSemanticContext(query);
+
+            // Fill variables into the prompt template
             Map<String, Object> variables = new HashMap<>();
-            variables.put("userQuery", query);
+            variables.put("userQuery", userQuery);
             variables.put("context", context);
 
+            // Create the full prompt using the template and variables
             PromptTemplate template = PromptTemplate.builder()
                     .template(promptTemplate)
                     .variables(variables)
@@ -156,33 +170,64 @@ public class BookService {
 
             Prompt prompt = new Prompt(template.createMessage());
 
-            // Step 6: Call AI and get matching book IDs
+            // Call the AI model to get generated product results
             Generation generation = chatClient.prompt(prompt)
                     .call()
                     .chatResponse()
                     .getResult();
 
-            // Step 7: Convert AI output to List<Book>
+            // Convert the AI's textual output into a list of Product objects
             BeanOutputConverter<List<Book>> outputConverter = new BeanOutputConverter<>(
                     new ParameterizedTypeReference<>() {}
             );
 
-            List<Book> matchedBooks = outputConverter.convert(generation.getOutput().getText());
+            List<Book> aiProducts = outputConverter.convert(generation.getOutput().getText());
 
-            return matchedBooks.stream()
-                    .filter(book -> book.getId() > 0)
+            // Extract valid product IDs (>0) from AI result
+            List<Long> bookIds = aiProducts.stream()
+                    .map(Book::getId)
+                    .filter(id -> id > 0)
                     .toList();
 
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to load or process voice query", e);
+           return bookRepo.findAllById(bookIds);
+
+        } catch (IOException e){
+            throw new RuntimeException("Failed to process query", e);
+        }
+        catch (NumberFormatException e) {
+            throw new RuntimeException("Invalid bookId format in vector metadata", e);
         }
     }
 
+    // Use vector store to find semantically similar documents based on query
+    private String fetchSemanticContext(String query) {
+        List<Document> documents = vectorStore.similaritySearch(
+                SearchRequest.builder()
+                        .query(query)
+                        .topK(5)                       // get top 5 most similar documents
+                        .similarityThreshold(0.7f)     // filter documents with similarity score below threshold
+                        .build()
+        );
+
+        // Build a combined context string from document contents
+        StringBuilder contextBuilder = new StringBuilder();
+        for (Document doc : documents) {
+            contextBuilder.append(doc.getFormattedContent()).append("\n");
+        }
+
+        return contextBuilder.toString();
+    }
+
+
     public List<Book> getAllBooks(String email) {
-        return bookRepo.findAllByEmail(email);
+        return bookRepo.findAllByUserEmail(email);
     }
 
     public void deleteBook(Long id) {
         bookRepo.deleteById(id);
+    }
+
+    public List<Book> fetchAllBooks(){
+        return bookRepo.findAll();
     }
 }

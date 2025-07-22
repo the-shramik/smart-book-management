@@ -7,7 +7,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
-import javax.validation.Valid;
 import java.io.IOException;
 import java.util.List;
 
@@ -19,14 +18,14 @@ public class BookController {
 
     @PostMapping
     public ResponseEntity<Book> addBook(
-            @RequestPart("book") @Valid @ModelAttribute Book book,
-            @RequestPart(value = "coverImage", required = false) MultipartFile image
+            @RequestPart Book book,
+            @RequestPart MultipartFile image
     ) throws IOException {
         Book saved = bookService.addBook(book, image);
         return ResponseEntity.ok(saved);
     }
 
-    @GetMapping
+    @GetMapping("/get-books-by-email")
     public ResponseEntity<List<Book>> getBooks(@RequestParam String email) {
         List<Book> books = bookService.getAllBooks(email);
         return ResponseEntity.ok(books);
@@ -60,10 +59,14 @@ public class BookController {
     @PostMapping("/voice-text-search")
     public ResponseEntity<List<Book>> searchByVoice(
             @RequestParam(value = "audio",required = false) MultipartFile audio,
-            @RequestParam(value = "query",required = false) String query,
-            @RequestParam("email") String email
+            @RequestParam(value = "query",required = false) String query
     ) {
-        List<Book> books = bookService.searchByVoice(audio,query,email);
+        List<Book> books = bookService.searchByVoice(audio,query);
         return ResponseEntity.ok(books);
+    }
+
+    @GetMapping("/get-books")
+    public ResponseEntity<List<Book>> getAllBooks(){
+        return ResponseEntity.ok(bookService.fetchAllBooks());
     }
 }
