@@ -1,6 +1,7 @@
 package com.telusko.aipoweredlibrarytrackerbackend.service;
 
 
+import com.telusko.aipoweredlibrarytrackerbackend.exception.ResourceNotFoundException;
 import com.telusko.aipoweredlibrarytrackerbackend.model.Book;
 import com.telusko.aipoweredlibrarytrackerbackend.repository.BookRepo;
 import org.springframework.ai.chat.client.ChatClient;
@@ -82,54 +83,136 @@ public class BookService {
     }
 
     // Generate description using AI
-    public String generateDescription(String title, String genre) {
-        String prompt = """
-        You are an expert book assistant.
-        Based on your knowledge of publicly known books, write a short, accurate, and engaging description.
-        
-        Book Title: %s
-        Genre: %s
-        
-        Instructions:
-        - Use real book knowledge if the book is well-known.
-        - If not, create a realistic but generic 200-character description.
-        - Keep it concise and appealing.
-
-        Max Length: 200 characters.
-        """.formatted(title, genre);
-
-        return chatClient.prompt(prompt)
-                .call()
-                .chatResponse()
-                .getResult()
-                .getOutput()
-                .getText()
-                .trim();
-    }
+//    public String generateDescription(String title, String genre) {
+//        String prompt = """
+//        You are an expert book assistant.
+//        Based on your knowledge of publicly known books, write a short, accurate, and engaging description.
+//
+//        Book Title: %s
+//        Genre: %s
+//
+//        Instructions:
+//        - Use real book knowledge if the book is well-known.
+//        - If not, create a realistic but generic 200-character description.
+//        - Keep it concise and appealing.
+//
+//        Max Length: 200 characters.
+//        """.formatted(title, genre);
+//
+//        return chatClient.prompt(prompt)
+//                .call()
+//                .chatResponse()
+//                .getResult()
+//                .getOutput()
+//                .getText()
+//                .trim();
+//    }
 
     // Generate cover image
-    public byte[] generateImage(String title, String genre, String desc) {
-        String imagePrompt = """
-        You are a professional book cover designer.
-        
-        Design a high-quality, realistic book cover based on the following details:
-        - Title: %s
-        - Genre: %s
-        - Description: %s
+//    public byte[] generateImage(String title, String genre, String desc) {
+//        String imagePrompt = """
+//        You are a professional book cover designer.
+//
+//        Design a high-quality, realistic book cover based on the following details:
+//        - Title: %s
+//        - Genre: %s
+//        - Description: %s
+//
+//        Style Requirements:
+//        - Clean and modern design
+//        - Professional typography
+//        - No human figures
+//        - Use genre-appropriate colors and imagery
+//        - Center the title visually
+//        - Avoid text except the title (no author, no blurbs)
+//
+//        Output: Book cover illustration only (not 3D or mockup).
+//        """.formatted(title, genre, desc);
+//
+//        return aiImageGeneratorService.generateImage(imagePrompt);
+//    }
 
-        Style Requirements:
-        - Clean and modern design
-        - Professional typography
-        - No human figures
-        - Use genre-appropriate colors and imagery
-        - Center the title visually
-        - Avoid text except the title (no author, no blurbs)
+    public Book generateCompleteBookDetails(String title) {
+        try {
+            String prompt = """
+        You are a professional AI book assistant trained on public data including Amazon, Goodreads, Wikipedia, and major book retailers.
 
-        Output: Book cover illustration only (not 3D or mockup).
-        """.formatted(title, genre, desc);
+        Task:
+        Given the book title: "%s", perform the following:
 
-        return aiImageGeneratorService.generateImage(imagePrompt);
+        1. Search your public knowledge base as if you were searching Google, Goodreads, Amazon, or Wikipedia.
+        2. Identify the exact book if available.
+        3. Extract accurate metadata from known sources, especially:
+           - title
+           - author
+           - genre (or category)
+           - pageCount (must match what's shown online)
+           - a short description (max 200 characters)
+
+        Only if the book is real and publicly available, return this JSON:
+        {
+          "title": "<Exact Title>",
+          "author": "<Verified Author>",
+          "genre": "<Genre>",
+          "description": "<Max 200 character summary>",
+          "pageCount": <Exact page count>
+        }
+
+        If the book does not exist or cannot be verified, return this:
+        {
+          "title": "%s",
+          "author": "Unknown",
+          "genre": "Unknown",
+          "description": "No official description available.",
+          "pageCount": 0
+        }
+
+        Important Notes:
+        - Do not fabricate details.
+        - Do not guess page count or author.
+        - Search intelligently and verify the result internally.
+        - Return only the valid JSON structure. No explanation or text outside the JSON.
+        """.formatted(title, title);
+
+            Generation generation = chatClient.prompt(prompt)
+                    .call()
+                    .chatResponse()
+                    .getResult();
+
+            BeanOutputConverter<Book> outputConverter = new BeanOutputConverter<>(
+                    new ParameterizedTypeReference<>() {}
+            );
+
+            Book aiBook = outputConverter.convert(generation.getOutput().getText());
+
+            // Generate image prompt
+            String imagePrompt = """
+        You are an AI image designer creating a book cover.
+
+        Book Title: %s
+        Genre: %s
+        Description: %s
+
+        Design Instructions:
+        - Realistic and modern
+        - No people
+        - Genre-appropriate illustration
+        - Clean background and centered title
+        """.formatted(aiBook.getTitle(), aiBook.getGenre(), aiBook.getDescription());
+
+            byte[] imageBytes = aiImageGeneratorService.generateImage(imagePrompt);
+
+            aiBook.setCoverImage(imageBytes);
+            aiBook.setImageType("image/png");
+            aiBook.setImageName(title.replaceAll(" ", "_").toLowerCase() + ".png");
+
+            return aiBook;
+
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to generate accurate book details for: " + title, e);
+        }
     }
+
 
 
     public List<Book> searchByVoice(MultipartFile audio, String userQuery) {
@@ -229,5 +312,28 @@ public class BookService {
 
     public List<Book> fetchAllBooks(){
         return bookRepo.findAll();
+    }
+
+    public Book updateBook(Book book, MultipartFile imageFile) {
+        Book existedBook = bookRepo.findById(book.getId()).orElseThrow(() -> new RuntimeException("Book with id " + book.getId() + " does not exist"));
+
+        try {
+            if (imageFile != null && !imageFile.isEmpty()) {
+                existedBook.setImageName(imageFile.getOriginalFilename());
+                existedBook.setImageType(imageFile.getContentType());
+                existedBook.setCoverImage(imageFile.getBytes());
+            }
+
+            existedBook.setTitle(book.getTitle());
+            existedBook.setGenre(book.getGenre());
+            existedBook.setDescription(book.getDescription());
+            existedBook.setAuthor(book.getAuthor());
+            existedBook.setPageCount(book.getPageCount());
+            existedBook.setUserEmail(book.getUserEmail());
+        }catch (IOException e){
+            throw new RuntimeException("Failed to process query", e);
+        }
+
+        return bookRepo.save(existedBook);
     }
 }
