@@ -14,6 +14,7 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/books")
+@CrossOrigin("*")
 public class BookController {
     @Autowired
     private BookService bookService;
@@ -63,7 +64,7 @@ public class BookController {
             @RequestParam(value = "audio",required = false) MultipartFile audio,
             @RequestParam(value = "query",required = false) String query
     ) {
-        List<Book> books = bookService.searchByVoice(audio,query);
+        List<Book> books = bookService.searchByVoiceOrText(audio,query);
         return ResponseEntity.ok(books);
 
     }

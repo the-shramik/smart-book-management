@@ -1,7 +1,5 @@
 package com.telusko.aipoweredlibrarytrackerbackend.service;
 
-
-import com.telusko.aipoweredlibrarytrackerbackend.exception.ResourceNotFoundException;
 import com.telusko.aipoweredlibrarytrackerbackend.model.Book;
 import com.telusko.aipoweredlibrarytrackerbackend.repository.BookRepo;
 import org.springframework.ai.chat.client.ChatClient;
@@ -134,71 +132,73 @@ public class BookService {
 
     public Book generateCompleteBookDetails(String title) {
         try {
+            // Step 1: Enhanced Prompt
             String prompt = """
-        You are a professional AI book assistant trained on public data including Amazon, Goodreads, Wikipedia, and major book retailers.
+                    You are a highly intelligent book assistant with access to public databases including Google Books, Amazon, Goodreads, and Wikipedia.
+                    
+                    Task:
+                    Search the web internally for a real book titled "%s" and extract ONLY verified metadata.
+                    
+                    1. Search your public knowledge base as if you were searching Google, Goodreads, Amazon, or Wikipedia.
+                    2. Identify the exact book if available.
+                    
+                    Return a valid JSON response:
+                    {
+                      "title": "<Exact title from source>",
+                      "author": "<Correct full name of author>",
+                      "genre": "<Real genre/category like Fiction, Biography, etc.>",
+                      "description": "<Engaging official or summarized description, max 200 characters>",
+                      "pageCount": <Exact number of pages, if listed online>
+                    }
+                    
+                    Strict Validation Rules:
+                    - DO NOT hallucinate or guess any information.
+                    - Use only verifiable, publicly available sources.
+                    - If the book is not found online or unverified, return:
+                      {
+                        "title": "%s",
+                        "author": "Unknown",
+                        "genre": "Unknown",
+                        "description": "No official description available.",
+                        "pageCount": 0
+                      }
+                    
+                    Notes:
+                    - Prioritize real-world data accuracy over response completion.
+                    - If multiple books match, use the most popular or widely listed version.
+                    - Return JSON ONLY. Do not include any explanation.
+                    """.formatted(title, title);
 
-        Task:
-        Given the book title: "%s", perform the following:
-
-        1. Search your public knowledge base as if you were searching Google, Goodreads, Amazon, or Wikipedia.
-        2. Identify the exact book if available.
-        3. Extract accurate metadata from known sources, especially:
-           - title
-           - author
-           - genre (or category)
-           - pageCount (must match what's shown online)
-           - a short description (max 200 characters)
-
-        Only if the book is real and publicly available, return this JSON:
-        {
-          "title": "<Exact Title>",
-          "author": "<Verified Author>",
-          "genre": "<Genre>",
-          "description": "<Max 200 character summary>",
-          "pageCount": <Exact page count>
-        }
-
-        If the book does not exist or cannot be verified, return this:
-        {
-          "title": "%s",
-          "author": "Unknown",
-          "genre": "Unknown",
-          "description": "No official description available.",
-          "pageCount": 0
-        }
-
-        Important Notes:
-        - Do not fabricate details.
-        - Do not guess page count or author.
-        - Search intelligently and verify the result internally.
-        - Return only the valid JSON structure. No explanation or text outside the JSON.
-        """.formatted(title, title);
-
-            Generation generation = chatClient.prompt(prompt)
-                    .call()
-                    .chatResponse()
+            // Step 2: Call AI
+            Generation generation = Objects.requireNonNull(chatClient.prompt(prompt)
+                            .call()
+                            .chatResponse())
                     .getResult();
 
+            // Step 3: Convert JSON to Book object
             BeanOutputConverter<Book> outputConverter = new BeanOutputConverter<>(
-                    new ParameterizedTypeReference<>() {}
+                    new ParameterizedTypeReference<>() {
+                    }
             );
-
+            assert generation.getOutput().getText() != null;
             Book aiBook = outputConverter.convert(generation.getOutput().getText());
 
-            // Generate image prompt
+            // Step 4: Generate clean AI-based book cover
+            assert aiBook != null;
+
             String imagePrompt = """
-        You are an AI image designer creating a book cover.
-
-        Book Title: %s
-        Genre: %s
-        Description: %s
-
-        Design Instructions:
-        - Realistic and modern
-        - No people
-        - Genre-appropriate illustration
-        - Clean background and centered title
-        """.formatted(aiBook.getTitle(), aiBook.getGenre(), aiBook.getDescription());
+                    Create a visually appealing book cover.
+                    
+                    Book Title: %s
+                    Genre: %s
+                    Description: %s
+                    
+                    Cover Design Rules:
+                    - Clean, modern design
+                    - Genre-specific artwork
+                    - No human figures
+                    - Centered title, clean background
+                    """.formatted(aiBook.getTitle(), aiBook.getGenre(), aiBook.getDescription());
 
             byte[] imageBytes = aiImageGeneratorService.generateImage(imagePrompt);
 
@@ -214,8 +214,7 @@ public class BookService {
     }
 
 
-
-    public List<Book> searchByVoice(MultipartFile audio, String userQuery) {
+    public List<Book> searchByVoiceOrText(MultipartFile audio, String userQuery) {
         try {
             // Load prompt template from classpath resource
             String promptTemplate = Files.readString(
@@ -228,6 +227,7 @@ public class BookService {
             String query = null;
 
             if (audio != null && !audio.isEmpty()) {
+                System.out.println("Audio coming!");
                 query = aiAudioTranscriptionModel.call(audio.getResource());
             } else if (userQuery != null && !userQuery.trim().isEmpty()) {
                 query = userQuery;
@@ -242,7 +242,7 @@ public class BookService {
 
             // Fill variables into the prompt template
             Map<String, Object> variables = new HashMap<>();
-            variables.put("userQuery", userQuery);
+            variables.put("userQuery", query);
             variables.put("context", context);
 
             // Create the full prompt using the template and variables
@@ -261,7 +261,8 @@ public class BookService {
 
             // Convert the AI's textual output into a list of Product objects
             BeanOutputConverter<List<Book>> outputConverter = new BeanOutputConverter<>(
-                    new ParameterizedTypeReference<>() {}
+                    new ParameterizedTypeReference<>() {
+                    }
             );
 
             List<Book> aiProducts = outputConverter.convert(generation.getOutput().getText());
@@ -272,12 +273,11 @@ public class BookService {
                     .filter(id -> id > 0)
                     .toList();
 
-           return bookRepo.findAllById(bookIds);
+            return bookRepo.findAllById(bookIds);
 
-        } catch (IOException e){
+        } catch (IOException e) {
             throw new RuntimeException("Failed to process query", e);
-        }
-        catch (NumberFormatException e) {
+        } catch (NumberFormatException e) {
             throw new RuntimeException("Invalid bookId format in vector metadata", e);
         }
     }
@@ -310,7 +310,7 @@ public class BookService {
         bookRepo.deleteById(id);
     }
 
-    public List<Book> fetchAllBooks(){
+    public List<Book> fetchAllBooks() {
         return bookRepo.findAll();
     }
 
@@ -330,7 +330,8 @@ public class BookService {
             existedBook.setAuthor(book.getAuthor());
             existedBook.setPageCount(book.getPageCount());
             existedBook.setUserEmail(book.getUserEmail());
-        }catch (IOException e){
+            existedBook.setRead(book.isRead());
+        } catch (IOException e) {
             throw new RuntimeException("Failed to process query", e);
         }
 
